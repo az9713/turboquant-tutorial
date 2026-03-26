@@ -1,0 +1,935 @@
+https://www.youtube.com/watch?v=iD29muStx1U
+
+In this video
+
+Google just announced TurboQuant, a compression algorithm that shrinks LLM memory by 6x with zero accuracy loss. But does it actually work on consumer hardware?
+
+🐦 Follow Tonbi on X for AI experiments and local LLM builds! https://x.com/tonbistudio
+
+I read the papers, implemented the algorithm from scratch in Claude Code, and tested it on a real model (Qwen 2.5 3B) running on my RTX 3060. The results: 5x compression at 3-bit with 99.5% attention fidelity. The math checks out.
+
+Try it yourself! Open-source at https://github.com/tonbistudio/turboq...
+
+What I tested:
+✅ Lloyd-Max codebooks (symmetric around zero)
+✅ MSE distortion within theoretical bounds
+✅ QJL bias correction (near-zero bias across all tests)
+✅ Needle-in-haystack retrieval (100% accuracy)
+✅ Real model attention preservation (99.5% at 3-bit)
+
+The practical results on RTX 3060:
+
+• KV cache: 289MB → 58MB at 3-bit (5x compression)
+• 8K context that needed 10GB now fits in under 2GB
+• Could mean 8K context → 40K context on the same hardware
+
+Scampi & Tonbi are a human-AI duo building and experimenting in public. Tonbi brings the hardware and curiosity. Scampi brings tireless research and shrimp energy. 🦐
+
+💻 GitHub: https://github.com/tonbistudio
+🌐 Portfolio: https://www.tonbistudio.com (https://www.tonbistudio.com/)
+
+Resources:
+📄 TurboQuant Paper: https://arxiv.org/abs/2504.19874
+📄 PolarQuant Paper: https://arxiv.org/abs/2502.02617
+📝 Google Blog: https://research.google/blog/turboqua...
+🙏 Credit: @Prince_Canuma for the Mac implementation that inspired this test
+
+Timestamps:
+0:00 - Google's TurboQuant announcement
+1:16 - What is TurboQuant? Simple breakdown
+2:05 - What is quantization?
+2:35 - What is the KV cache?
+3:17 - How TurboQuant works (PolarQuant + QJL)
+4:02 - The claimed results (6x memory, 8x speed)
+5:47 - Building my own implementation in Claude Code
+7:05 - Test 1: Lloyd-Max codebook validation
+7:53 - Test 2: QJL bias correction (the key finding)
+9:07 - Test 3: KV cache compression ratios
+9:41 - Test 4: Needle-in-haystack retrieval
+10:15 - Real results on RTX 3060
+11:29 - Testing with Qwen 2.5 3B model
+13:43 - Attention preservation accuracy
+15:38 - 3-bit is the sweet spot
+16:50 - What this means for local LLMs
+
+Key takeaways:
+
+• 3-bit compression = 5x smaller KV cache with 99.5% accuracy
+• 2-bit works but pushes it (66% top-1 match)
+• No retraining needed, works on existing models
+• Consumer GPUs can now handle much longer contexts
+
+Chapters
+
+Transcript
+Search in video
+Google's TurboQuant announcement
+0:00
+So earlier today I saw this tweet from
+0:03
+Google research introducing Turbo Quant
+0:05
+which was a new compression algorithm
+0:07
+that can reduce LLM key value cache
+0:11
+memory by at least 6x. And I went on to
+0:14
+read this blog a little bit. It goes
+0:15
+into fairly good detail about how turbo
+0:17
+quant works, what the previous research
+0:20
+had been and how the actual experiment
+0:22
+and results came out. So I thought this
+0:25
+was interesting. I thought this was a
+0:26
+pretty big breakthrough. So, in this
+0:28
+video, I'm just going to try to break
+0:29
+down what this TurboQuan is because the
+0:31
+blog itself and the papers are pretty
+0:33
+dense. I'm going to try to explain in
+0:35
+simple terms what the problem it's
+0:37
+trying to fix and how it tries to fix
+0:38
+it. And then I'm actually going to on my
+0:41
+PC and GPU try to validate the approach,
+0:44
+try to see what results we can get in
+0:46
+testing. Now, Google hasn't uh released
+0:49
+the official implementation of this, but
+0:51
+there was enough to go on by these
+0:53
+papers to validate the actual math in
+0:55
+the algorithm and to try to implement it
+0:58
+on my PC just to check that the approach
+1:01
+itself
+1:03
+actually produced some results. So, this
+1:05
+isn't the official Google's uh Turbo
+1:07
+Quant, but I will be testing the
+1:10
+approach based on my own research and
+1:12
+experiment. First, let me break down
+1:14
+what Turbo Quant is a little bit. So how
+What is TurboQuant? Simple breakdown
+1:16
+Google is making AI models six to eight
+1:20
+six times smaller and eight times faster
+1:21
+without losing any accuracy.
+1:24
+So first the problem AI models like
+1:26
+ChachiBD Gemini and Llama are incredibly
+1:28
+powerful but they're also massive. Um
+1:32
+they store billions of numbers which
+1:34
+mean they need expensive specialized
+1:35
+hardware just to run. That makes them
+1:37
+slow, costly, and out of reach for a lot
+1:39
+of people. If you ever waited for a few
+1:42
+seconds for an AI to respond, that's why
+1:44
+it's crunching enormous enormous amounts
+1:47
+of data behind the scenes. And that's
+1:49
+why it's just too difficult to run
+1:51
+really high level frontier models or
+1:54
+even high performance local LMS on a lot
+1:58
+of smaller uh retail devices and I've
+2:02
+encountered this myself. So what is
+What is quantization?
+2:05
+quantization? So, think of this as like
+2:08
+compressing a photo. A raw photo off
+2:11
+your camera might be 50 megabytes, but
+2:13
+when you save it as a jeep JPEG, it
+2:15
+drops to 2 megabytes. And honestly, you
+2:17
+can barely tell the difference. So,
+2:19
+quantization does the same thing for AI.
+2:21
+Instead of storing every single number
+2:23
+with 32 digits of position, it rounds
+2:25
+down to just three or four digits. The
+2:28
+AI still gives you the same quality
+2:30
+answers, but it just needs a fraction of
+2:32
+the memory. So, what's a KV cache, which
+2:34
+is a key concept with TurboQuan? Uh, so
+What is the KV cache?
+2:37
+this is
+2:39
+kind of like the AI's cheat sheet during
+2:41
+a conversation. When you have a
+2:43
+conversation with the AI, it needs to
+2:44
+remember everything you've said so far.
+2:47
+And the key value cache is like a cheat
+2:49
+sheet it writes as you talk. The keys
+2:51
+are like the labels. What topic was this
+2:53
+about? And the values are the actual
+2:54
+information. The issue is as this cheat
+2:57
+sheet grows with every message in
+2:59
+context, it's a long conversation. It
+3:01
+can eat up gigabytes of memory and
+3:03
+that's memory that could be used to make
+3:04
+the AI smarter or faster. So if we can
+3:07
+shrink this down without losing
+3:08
+important information, everything gets
+3:10
+better. We can have longer
+3:11
+conversations, cheaper hardware, faster
+3:14
+responses. And this is where Turbo Quant
+3:16
+comes in. It's a two-stage process. In
+How TurboQuant works (PolarQuant + QJL)
+3:20
+stage one, which uses polar quant, it
+3:22
+reorganizes the data in a simpler shape.
+3:25
+Think of it like neatly folding your
+3:26
+clothes before packing a suitcase. And
+3:28
+then in stage two, it uh QJL, it
+3:32
+captures [snorts] the fine details that
+3:33
+stage one might miss. It uses clever
+3:35
+math trick to compress information to
+3:38
+simple plus or minus signals with zero
+3:40
+extra memory overhead. So the result is
+3:42
+the data goes from 32 bits down to just
+3:45
+three
+3:46
+per number, roughly a 10x reduction,
+3:50
+and the AI answers stay the same. And
+3:52
+you don't need any kind of retraining on
+3:54
+the models. you can just apply this to
+3:56
+an existing model and it works. So the
+3:58
+numbers speak for themselves according
+4:00
+to their research
+The claimed results (6x memory, 8x speed)
+4:02
+and according to their papers. Uh 6S 6x
+4:05
+less memory used for the KB cache, 8x
+4:09
+for faster processing on they were using
+4:11
+H100 GPUs. Uh 3bit precision with zero
+4:15
+accuracy loss and 0% accuracy drop
+4:18
+across all benchmarks. They tested this
+4:20
+on popular open- source models like
+4:22
+Gemma, Mistrol, Llama using several
+4:25
+different benchmarks
+4:27
+and Turbo Quant really outperformed a
+4:29
+lot of the existing compression models
+4:32
+and it there's no training needed.
+4:36
+It works out of the box. So what does
+4:38
+this mean for us? The people who run AI
+4:40
+on their own computers, you could run
+4:43
+bigger models on less hardware.
+4:46
+You could have much longer
+4:47
+conversations. Um, the 6x smaller KV
+4:50
+cache means your local AI can remember
+4:52
+6x more context without running out of
+4:54
+memory or slowing down, which I'm sure
+4:56
+we've all experienced if you use local
+4:58
+LMS a lot. You [snorts] get faster
+5:00
+responses in theory. Um, and you can use
+5:03
+extreme compression. That brings us to
+5:06
+using genuinely useful local AI offline
+5:09
+on mobile devices, which is kind of the
+5:12
+dream.
+5:15
+So in theory, if this works, the impact
+5:16
+on AI models in general, you would have
+5:18
+cheaper cloud AI, greener AI, less
+5:21
+memory and faster processing means less
+5:23
+electricity consumed. So you could have
+5:26
+AI everywhere on all sorts of devices
+5:28
+that right now can't run them. And you
+5:30
+can run bigger models on the same
+5:31
+hardware instead of having to buy new
+5:33
+GPUs. So the key takeaway here is that
+5:36
+Turbo Quant proves that we can make AI
+5:38
+dramatically smaller and dramatically
+5:39
+faster without sacrificing quality. So,
+5:42
+it's a plug-and-play breakthrough that
+5:44
+works on any model. No retraining
+5:46
+needed. So, in order to actually
+Building my own implementation in Claude Code
+5:48
+validate this, I decided to go into claw
+5:51
+code using Opus 4.6 and actually dig
+5:53
+into the papers and see if we could
+5:55
+validate the math behind it. Um, so we
+5:58
+did just that. And I did this in claw
+5:59
+code. Um, and it was a groundup
+6:02
+implementation of turboquant. Obviously,
+6:04
+not the exact same thing, but in theory,
+6:07
+it had every component described in the
+6:09
+paper. And we did this as a Python
+6:11
+package.
+6:16
+So these were the four building blocks.
+6:19
+Uh the key point is that we didn't use
+6:20
+Google's code. We wrote each piece
+6:22
+independently based on the papers. If
+6:24
+you looked in the blog, there's a couple
+6:26
+papers that were
+6:28
+used for Turbo Quan.
+6:34
+And here you can see the four uh
+6:37
+implementation that we did which was
+6:40
+using a foundation the Lloyd max code
+6:42
+book then stage one was the turbo quant
+6:45
+MSSE stage two was the turbo quant prod
+6:48
+and then the integration with the KB
+6:49
+cache wrapper. So all of these were used
+6:53
+to validate that the math behind turbo
+6:57
+quant was accurate. So the first test
+6:59
+was this Lloyd Max code books and the
+7:01
+main takeaway there's a lot of advanced
+7:03
+math in this I know um but the key
+Test 1: Lloyd-Max codebook validation
+7:06
+takeaway is just to understand this
+7:07
+bottom here zero so the symmetry check
+7:11
+uh was at zero so it means the code book
+7:14
+which is the dictionary the compressor
+7:16
+uses to translate numbers needs to be
+7:18
+perfectly balanced so it's symmetric
+7:20
+around zero it is if it wasn't the
+7:22
+compression would favor certain values
+7:24
+and that would introduce a lot of errors
+7:26
+for MSE distortion
+7:28
+uh we found that empirical MSSE stayed
+7:30
+well within the theoretical bounds and
+7:33
+this is mainly that the percentages you
+7:35
+could see here in the bars. Uh the paper
+7:38
+says that the error will be no worse
+7:40
+than X. Our actual error came well under
+7:43
+that. So the next test and this is kind
+7:46
+of the most important one is that um we
+7:48
+found that the QJL correction makes the
+7:51
+inner products unbiased. Um this is
+Test 2: QJL bias correction (the key finding)
+7:54
+critical. The bias column is the one to
+7:56
+point out here. Uh you can see it here.
+7:59
+It's nearly zero everywhere. And this is
+8:02
+important because when AI picks which
+8:03
+word to say next, it compares the
+8:05
+vectors using inner products. If a
+8:08
+compression makes those comparisons
+8:09
+consistently wrong in one direction, the
+8:12
+AI AI is going to give bad answers. So
+8:14
+the bias being very close to zero means
+8:16
+the compression doesn't skew the AI's
+8:19
+decision-m.
+8:21
+So the correlation as well you can see
+8:26
+at even three bit the compressed version
+8:29
+agrees with the real answer 92% of the
+8:31
+time.
+8:34
+So why were there two stages? Because
+8:36
+stage one alone can result in biased
+8:38
+findings. And with stage one and QJL
+8:43
+that was where we were able to secure an
+8:45
+unbi biased finding.
+8:48
+So imagine compressing a photo and the
+8:50
+colors shift slightly blue. Stage one is
+8:53
+the compression. Stage two is the
+8:55
+automatic color correction that
+8:57
+perfectly undoes the shift and at the
+9:00
+cost of just one extra bit per number.
+9:03
+So we also measured the compression
+9:05
+rates on the KV cache. We built a full
+Test 3: KV cache compression ratios
+9:08
+KV key value cache wrapper and measured
+9:10
+the real memory savings. Um and once
+9:12
+again this is all in claw code.
+9:15
+We saw 7.76x
+9:18
+compression at 2 bit, 5.22x compression
+9:21
+at 3bit, and 3.94x at 4bit. And you can
+9:26
+see here's the configuration if you'd
+9:28
+like to see it for yourself.
+9:32
+And then we did a needle in a haystack
+9:35
+test uh and we found that we had 100%
+9:38
+retrieval accuracy after the
+9:39
+compression.
+Test 4: Needle-in-haystack retrieval
+9:41
+Um, so you can see these are all exact
+9:44
+nine out of nine, zero information loss
+9:47
+for retrieval.
+9:54
+So the test basically hid one specific
+9:56
+piece of info among 8,192
+9:59
+others, compressed everything down to
+10:01
+two bits or three bits or four bits, and
+10:04
+then asked, can you still find it? So
+10:05
+the answer was yes every time. So this
+10:08
+is the test that proves that compression
+10:10
+doesn't lose the important stuff. So
+10:13
+these are the real results uh on my RTX
+Real results on RTX 3060
+10:16
+300 uh 3060 my PC couple years old now
+10:22
+and kind of a mid-range gaming PC and
+10:26
+this was the main finding we found 5.3x
+10:29
+memory compression and then uh
+10:33
+that is the real takeaway for a consumer
+10:36
+GPU that would be real savings 5.3x
+10:38
+compression means the KV cache would
+10:40
+only that would filled uh 10 GB now fits
+10:44
+under two, leaving a ton of room for the
+10:46
+model itself. So it would allow you to
+10:49
+run larger and more powerful local LMS
+10:51
+on the same device. Now obviously our
+10:54
+Python implementation here isn't speed
+10:56
+optimized yet. The report reports up to
+10:59
+8x speeds uh using H100s. The focus here
+11:03
+was just to kind of validate that the
+11:05
+math was accurate. So the verdict was
+11:07
+that the math checked out. All seven our
+11:09
+tests passed and uh the MSE distortion
+11:12
+was within bounds. Inner products are
+11:14
+unbiased. The needle retrieval was
+11:16
+perfect. Compress compression ratios
+11:19
+match the papers that we saw. Okay. So
+11:22
+now I'm in quad uh cloud code and we're
+11:25
+going to be working with a real blend
+11:27
+model. And it took some trial and error
+Testing with Qwen 2.5 3B model
+11:29
+to actually get a proper test using my
+11:32
+my hardware, but we did it. So I did
+11:35
+this in uh with Opus 4.6. What we did
+11:38
+was we implemented the Google's turbo
+11:41
+quant algorithm from their paper uh the
+11:44
+2026 paper and tested it on a real
+11:46
+language model. In this case, we used
+11:48
+Quen 2.53B
+11:50
+and this was running on my 3060. So I
+11:53
+explained to you uh this was just the uh
+11:56
+test that I explained before when we
+11:58
+were testing the math. So the actual
+12:00
+validation test was with uh the Quen 2.3
+12:04
+2.5 3B model in four bit weights. So
+12:08
+this would fit in 2 gigs of VRAM. We fed
+12:11
+it a long document with a hidden fact.
+12:14
+Ran a single forward pass to capture the
+12:16
+real key value cache. Compressed the key
+12:19
+value cache with Turbo Quant, the
+12:21
+theoretical TurboQuant at 2bit, 3bit,
+12:24
+4bit, compare the attention scores. So
+12:26
+basically when the model looks back at
+12:28
+previous tokens, does it look at the
+12:30
+same ones with compressed versus
+12:32
+uncompressed keys? So this is a good
+12:35
+test in our case because the attention
+12:38
+scores are actually determine the
+12:40
+model's output. If the attention pattern
+12:42
+is preserved, then it means the model's
+12:44
+behavior is preserved. And you can see
+12:46
+the compression results, how much the
+12:48
+original took up the KV cache. Uh the
+12:52
+original was 289 megabytes. 4bit was 76.
+12:57
+So that's 3.8 times smaller. The 3bit
+13:01
+got us to five times smaller. and the
+13:03
+two bit got us to 7.3 times. So that was
+13:05
+similar the previous slides if you
+13:07
+remember similar to the theoretical
+13:10
+compression savings that we were thought
+13:12
+we would get using the quen model here.
+13:14
+Uh so at 3bit we used
+13:18
+so at 3bit what used to take 289
+13:21
+megabits now takes only 58. So on my uh
+13:25
+12 gig
+13:27
+uh GPU RTX 3060, that's the difference
+13:30
+between between fitting 8,000 context
+13:34
+and fitting 40,000 with the same model.
+13:37
+So that's a huge difference if you're
+13:38
+actually using these models locally. Uh
+13:41
+so here's the real key is the accuracy.
+Attention preservation accuracy
+13:43
+How accurate was it? How well was
+13:45
+attention preserved? And these are the
+13:47
+results of our test. And you can see
+13:50
+these all scored very very well. uh
+13:52
+0.995
+13:55
+over here with the three bit. Uh this
+13:59
+means the compressed attention pattern
+14:00
+is 99.5%
+14:02
+similar to the original uncompressed. So
+14:05
+very very slight decrease with a huge
+14:07
+longer context is to be expected. More
+14:10
+tokens means more chances for very small
+14:12
+errors. But even at 8K 3bit stays above
+14:18
+uh.994. So very impressive accuracy. So
+14:23
+this means the accuracy was pretty well
+14:25
+very well preserved even though we were
+14:27
+able to save so much more space in
+14:29
+context. Uh so these are very high. Very
+14:32
+good. Top one match. Does the model look
+14:35
+at the exact same most important token?
+14:37
+You can see the rates here. Top five
+14:39
+match. So this is across all 36 layers
+14:43
+and two uh key value heads per layer. So
+14:46
+at 3bit, 92% of the time the model's top
+14:49
+pick is still in the top five and the
+14:51
+overall attention distribution is 99.5%
+14:55
+similar. So what this means, what does
+14:57
+this all mean?
+15:00
+The claims are holding up. Uh previous
+15:04
+users kind of testing this reported 3.8x
+15:07
+and 4.9x compression. And I have to give
+15:11
+credit here to Prince Kuma who uh ran
+15:14
+this experiment. And when I saw his
+15:16
+tweet, I got kind of inspired. He did
+15:18
+this on a Mac. Decided to try to do this
+15:20
+on a PC and see if I could do it. But we
+15:22
+got very similar results from our our
+15:24
+test to his test. Uh we got 3.8x and 5x
+15:28
+at equivalent bit widths. So 3bit is the
+15:31
+practical sweet spot. You get 5x
+15:33
+compression with 99.5% attention
+15:35
+fidelity. It's pretty great. Um the
+3-bit is the sweet spot
+15:38
+paper's zero accuracy loss claim is
+15:40
+reasonable. At 3 to four bits, the
+15:42
+attention patterns are so close to the
+15:44
+original. uh that generation quality
+15:46
+would be nearly indis indistinguishable
+15:49
+in practice and I'm sure the actual
+15:51
+official turbo quant will be much more
+15:54
+refined in its approach so it could
+15:56
+probably even get better results than we
+15:58
+got here. Um the two bit works but it
+16:01
+pushes it 7.3x compression is aggressive
+16:04
+and the 66% top one match means the
+16:07
+model would sometimes attend to
+16:08
+different tokens which could change
+16:10
+outputs but seems that 3bit was the best
+16:12
+one today. I just wanted to validate
+16:15
+this theoretically and then using actual
+16:17
+model. Uh we didn't do actual text
+16:19
+generation quality or the speed
+16:22
+improvements that the papers did or
+16:23
+longer context. But maybe down the line
+16:26
+we could try this. Uh but pretty great
+16:28
+results nonetheless
+16:30
+using an actual model on my PC and
+16:34
+seeing if the compression algorithm
+16:35
+works. And it really did. Exciting to
+16:38
+see the actual official Turbo Quant see
+16:41
+what it can do. But it seems like more
+16:44
+and more we're going to be able to run
+16:46
+more heavy duty local models on just
+16:49
+normal consumer hardware which is
+What this means for local LLMs
+16:51
+exciting. So that's it for today. Um we
+16:54
+just I kind of broke down what Turbo
+16:56
+Quant was from today Google's
+16:58
+announcement tried to make it more
+17:00
+understandable
+17:02
+and then ran a couple validation tests
+17:05
+testing the actual algorithm does the
+17:07
+math make sense and then test testing it
+17:09
+with a actual model. this uh Quen 2.5
+17:13
+model that I was using here. So, that's
+17:15
+going to be it for today. Uh please
+17:18
+leave a comment, like, subscribe to the
+17:20
+channel. I do a lot of these kind of
+17:22
+experimenting new AI tools. If you had
+17:26
+any questions about how you do this, I'm
+17:28
+going to I'll publish in my GitHub repo
+17:31
+the tests and scripts that I use to do
+17:34
+this implement this. So, check that out
+17:36
+uh at Tombi Studio. It's going to be my
+17:38
+GitHub. Well, I'll do that tomorrow. Uh,
+17:41
+but yeah, that's it for this video.
+17:43
+Please like, subscribe, and I will see
+17:46
+you in the next video.
+
+Join the top minds in tech at Next '26.
