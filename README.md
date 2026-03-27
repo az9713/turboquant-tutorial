@@ -32,6 +32,22 @@ The tutorial was produced by a multi-agent pipeline (researcher → writer → e
 
 A detailed behind-the-scenes account of the AI agent team that produced the tutorial — including agent profiles, the task system, communication protocol, turn-by-turn narrative, and quality metrics from the write-edit loop.
 
+### ✅ [`test_report.md`](test_report.md) — Verified Test Run
+
+All 7 tests in [`test_turboquant.py`](test_turboquant.py) — the original synthetic verification suite written by Tonbi Studio — were run against this implementation and passed. The report includes the raw output from each test alongside an interpretation of what each test checks and what healthy results look like.
+
+| Test | What it verifies | Result |
+|---|---|---|
+| 1 — Lloyd-Max Codebook | Codebook symmetry and distortion structure | PASSED |
+| 2 — MSE Distortion | Reconstruction error within theoretical bounds | All [OK] |
+| 3 — Inner Product Unbiasedness | QJL correction yields near-zero bias | bias < 0.002 at all bit-widths |
+| 4 — MSE-Only Bias | Stage 1 alone is biased (motivates Stage 2) | Confirmed |
+| 5 — KV Cache Compression | Memory savings match theory (~16/bits ratio) | 7.8x / 5.2x / 3.9x at 2/3/4-bit |
+| 6 — Needle-in-Haystack | Quantized cache finds the right key | 9/9 EXACT across all bit-widths and seq lengths |
+| 7 — GPU Benchmark | CUDA throughput (skipped — no GPU in this run) | Skipped |
+
+See [`test_report.md`](test_report.md) for the full output and per-test interpretation.
+
 ---
 
 ## Background
