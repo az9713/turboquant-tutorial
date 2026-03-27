@@ -4,6 +4,8 @@ Tests MSE distortion bounds, inner product accuracy, and compression ratios
 against theoretical predictions from the paper.
 """
 
+import io
+import re
 import torch
 import math
 import time
@@ -289,41 +291,174 @@ def test_gpu_if_available():
     print()
 
 
+_INTERPRETATIONS = {
+    1: """\
+**What it checks:** The structure of the Lloyd-Max codebook — the set of optimal quantization \
+buckets for each bit-width and dimension.
+
+- `levels` should equal `2^bits` (2, 4, 8, 16). Confirms the correct number of buckets.
+- `distortion/coord` decreases as bits or `d` increase. Larger `d` means better averaging, \
+so per-coordinate error shrinks.
+- `centroids range` should be symmetric (e.g. `[-0.19, 0.19]`). Asymmetry indicates a bug.
+- **Symmetry check** is the key assertion: `sum of centroids ≈ 0`. Non-zero means the \
+codebook is biased, which would corrupt all inner product estimates downstream.
+
+**Healthy result:** `PASSED`, distortion monotonically decreasing with bits and d.""",
+
+    2: """\
+**What it checks:** Whether the quantizer's actual reconstruction error stays within the \
+theoretical guarantee from the paper.
+
+- `MSE` — empirical mean squared error over 1,000 random unit vectors.
+- `theory_bound` — the paper's upper bound: `√3 · π/2 · (1/4^bits)`.
+- `ratio = MSE / theory_bound` — must be ≤ 1.0 to satisfy the bound. Values around 0.5–0.9 \
+are normal (the bound is loose).
+- `[OK]` means ratio ≤ 1.5 (with slack for finite `d`). `[WARN]` means the bound is violated.
+
+**Healthy result:** All `[OK]`, ratios well below 1.0, MSE approximately halving with each \
+added bit.""",
+
+    3: """\
+**What it checks:** Whether the full two-stage TurboQuant estimator (Stage 1 MSE + Stage 2 \
+QJL correction) gives accurate, unbiased dot product estimates.
+
+- `bias` — systematic offset of estimated vs true inner products. Should be near `0.000`. \
+This is the QJL correction doing its job.
+- `RMSE` — random error around the true value. Decreases with more bits.
+- `corr` — Pearson correlation between estimated and true inner products across 2,000 pairs. \
+Most intuitive metric: 0.80 at 2-bit, 0.97 at 4-bit. Even 0.80 preserves the relative \
+ranking of tokens well enough for attention.
+- `theory_D` — the paper's variance bound. `RMSE²` should be near or below this.
+
+**Healthy result:** Bias near zero at all bit-widths, correlation improving from ~0.80 → ~0.97.""",
+
+    4: """\
+**What it checks:** Demonstrates *why* Stage 2 (QJL) is necessary by showing that Stage 1 \
+(MSE quantization) alone produces biased inner products.
+
+- MSE quantization shrinks vectors, so dot products are systematically underestimated.
+- Compare these bias values with Test 3: after QJL correction, bias drops to near zero.
+- The message printed per row is intentional — it is the conceptual point of this test.
+
+**Healthy result:** Non-zero biases (contrasting with Test 3's near-zero values), confirming \
+QJL is load-bearing.""",
+
+    5: """\
+**What it checks:** Real memory savings from quantizing a simulated KV cache of 1,024 vectors.
+
+- `compression` ratio: 2-bit ≈ 7.8x, 3-bit ≈ 5.2x, 4-bit ≈ 3.9x vs FP16. \
+Approximately `16/bits`.
+- `attention scores shape` confirms the cache can serve attention queries — one score per \
+cached key.
+- `range` of scores is a sanity check that outputs are not degenerate (zeros or NaN).
+
+**Healthy result:** Compression ratios close to `16/bits`, valid score shapes with \
+non-degenerate ranges.""",
+
+    6: """\
+**What it checks:** The most practical test — whether the quantized cache can still find the \
+most-relevant key even at long sequence lengths.
+
+- A "needle" key is hidden among 512 / 2,048 / 8,192 random keys. A query identical to \
+that needle is issued. The test checks whether the needle ranks #1 after quantization.
+- `[EXACT]` = needle was top-1 ranked. `[TOP-5]` = in top 5. `[MISS]` = not found.
+- 9/9 `[EXACT]` means quantization does not degrade retrieval at all, even at 2-bit and \
+8K context.
+
+**Healthy result:** All 9 rows `[EXACT]`. Any `[MISS]` at 3-bit or 4-bit would be alarming.""",
+
+    7: """\
+**What it checks:** Raw throughput on CUDA — quantization latency and inner product speed \
+vs full FP16 matmul.
+
+- `Quantize N keys` — time in ms to compress an 8,192-key sequence.
+- `Inner product (Q queries × N keys)` — attention scoring time vs full-precision matmul.
+- TurboQuant trades compute for memory bandwidth; on memory-bound hardware it can be faster \
+than FP16 matmul.
+- Memory comparison shows the actual byte savings at the configured bit-width.
+
+**Without GPU:** Test is skipped. Run `validate.py` on a CUDA machine to see real \
+throughput numbers.""",
+}
+
+
 class _Tee:
-    """Write to both stdout and a file simultaneously."""
-    def __init__(self, file):
-        self._file = file
+    """Write to both stdout and a StringIO buffer simultaneously."""
+    def __init__(self, buf):
+        self._buf = buf
         self._stdout = sys.stdout
     def write(self, data):
         self._stdout.write(data)
-        self._file.write(data)
+        self._buf.write(data)
     def flush(self):
         self._stdout.flush()
-        self._file.flush()
+
+
+def _write_markdown_report(captured: str, path: str):
+    SEP = "=" * 60
+    parts = captured.split(SEP)
+    # parts[0]          = header text
+    # parts[1,3,5,...]  = section titles  ("TEST N: ..." or "ALL TESTS COMPLETE")
+    # parts[2,4,6,...]  = section content
+
+    lines = ["# TurboQuant Test Report\n"]
+
+    header = parts[0].strip()
+    if header:
+        lines.append(f"_{header}_\n")
+        lines.append("---\n")
+
+    i = 1
+    while i < len(parts):
+        title = parts[i].strip()
+        content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        i += 2
+
+        if not title:
+            continue
+
+        lines.append(f"## {title}\n")
+
+        if content:
+            lines.append("```")
+            lines.append(content)
+            lines.append("```\n")
+
+        m = re.match(r"TEST (\d+)", title)
+        if m:
+            test_num = int(m.group(1))
+            if test_num in _INTERPRETATIONS:
+                lines.append("### Interpretation\n")
+                lines.append(_INTERPRETATIONS[test_num])
+                lines.append("")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":
-    report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_report.txt")
-    with open(report_path, "w") as report_file:
-        sys.stdout = _Tee(report_file)
+    report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_report.md")
+    buf = io.StringIO()
+    original_stdout = sys.stdout
+    sys.stdout = _Tee(buf)
 
-        print()
-        print("TurboQuant Implementation Verification")
-        print("Based on: 'TurboQuant: Online Vector Quantization' (ICLR 2026)")
-        print()
+    print()
+    print("TurboQuant Implementation Verification")
+    print("Based on: 'TurboQuant: Online Vector Quantization' (ICLR 2026)")
+    print()
 
-        test_lloyd_max_codebook()
-        test_mse_quantizer()
-        test_inner_product_unbiasedness()
-        test_mse_only_inner_product_bias()
-        test_kv_cache()
-        test_needle_in_haystack()
-        test_gpu_if_available()
+    test_lloyd_max_codebook()
+    test_mse_quantizer()
+    test_inner_product_unbiasedness()
+    test_mse_only_inner_product_bias()
+    test_kv_cache()
+    test_needle_in_haystack()
+    test_gpu_if_available()
 
-        print("=" * 60)
-        print("ALL TESTS COMPLETE")
-        print("=" * 60)
+    print("=" * 60)
+    print("ALL TESTS COMPLETE")
+    print("=" * 60)
 
-        sys.stdout = sys.stdout._stdout
-
+    sys.stdout = original_stdout
+    _write_markdown_report(buf.getvalue(), report_path)
     print(f"\nReport saved to: {report_path}")
