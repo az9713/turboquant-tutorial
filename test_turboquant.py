@@ -289,20 +289,41 @@ def test_gpu_if_available():
     print()
 
 
+class _Tee:
+    """Write to both stdout and a file simultaneously."""
+    def __init__(self, file):
+        self._file = file
+        self._stdout = sys.stdout
+    def write(self, data):
+        self._stdout.write(data)
+        self._file.write(data)
+    def flush(self):
+        self._stdout.flush()
+        self._file.flush()
+
+
 if __name__ == "__main__":
-    print()
-    print("TurboQuant Implementation Verification")
-    print("Based on: 'TurboQuant: Online Vector Quantization' (ICLR 2026)")
-    print()
+    report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_report.txt")
+    with open(report_path, "w") as report_file:
+        sys.stdout = _Tee(report_file)
 
-    test_lloyd_max_codebook()
-    test_mse_quantizer()
-    test_inner_product_unbiasedness()
-    test_mse_only_inner_product_bias()
-    test_kv_cache()
-    test_needle_in_haystack()
-    test_gpu_if_available()
+        print()
+        print("TurboQuant Implementation Verification")
+        print("Based on: 'TurboQuant: Online Vector Quantization' (ICLR 2026)")
+        print()
 
-    print("=" * 60)
-    print("ALL TESTS COMPLETE")
-    print("=" * 60)
+        test_lloyd_max_codebook()
+        test_mse_quantizer()
+        test_inner_product_unbiasedness()
+        test_mse_only_inner_product_bias()
+        test_kv_cache()
+        test_needle_in_haystack()
+        test_gpu_if_available()
+
+        print("=" * 60)
+        print("ALL TESTS COMPLETE")
+        print("=" * 60)
+
+        sys.stdout = sys.stdout._stdout
+
+    print(f"\nReport saved to: {report_path}")
